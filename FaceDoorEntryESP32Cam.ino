@@ -20,7 +20,6 @@ unsigned long start_time = 0;
 const char *ssid = "OpenWrt";       //<===== Enter the name of your Wi-Fi access point here
 const char *password = "q1w2e3r4";  //<===== Enter your Wi-Fi access point password here
 
-
 #define ENROLL_CONFIRM_TIMES 5
 #define FACE_ID_SAVE_NUMBER 7
 
@@ -428,6 +427,7 @@ void loop0_task(void *pvParameters) {
 
       if (millis() - interval > door_opened_millis) {
         digitalWrite(relay_pin, LOW);
+      esp_task_wdt_reset(); // Resetting the Watchdog Timer
       }
 
       fb = esp_camera_fb_get();
@@ -438,6 +438,8 @@ void loop0_task(void *pvParameters) {
       fmt2rgb888(fb->buf, fb->len, fb->format, out_res.image);
 
       out_res.net_boxes = face_detect(image_matrix, &mtmn_config);
+
+      esp_task_wdt_reset(); // Resetting the Watchdog Timer
 
       if (out_res.net_boxes) {
         if (align_face(out_res.net_boxes, image_matrix, aligned_face) == ESP_OK) {
@@ -457,6 +459,7 @@ void loop0_task(void *pvParameters) {
           }
           dl_matrix3d_free(out_res.face_id);
         }
+      esp_task_wdt_reset(); // Resetting the Watchdog Timer
       } else {
         Serial.println("NO FACE DETECTED");
       }
