@@ -7,18 +7,23 @@
 #include "fd_forward.h"
 #include "fr_forward.h"
 #include "fr_flash.h"
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_task_wdt.h"
 
-const char* ssid = "NSA";
-const char* password = "Orange";
+bool autonom = 1;
+bool WFconn = false;
+unsigned long start_time = 0;
+
+const char *ssid = "OpenWrt";       //<===== Enter the name of your Wi-Fi access point here
+const char *password = "q1w2e3r4";  //<===== Enter your Wi-Fi access point password here
+
 
 #define ENROLL_CONFIRM_TIMES 5
 #define FACE_ID_SAVE_NUMBER 7
 
-// Select camera model
-//#define CAMERA_MODEL_WROVER_KIT
-//#define CAMERA_MODEL_ESP_EYE
-//#define CAMERA_MODEL_M5STACK_PSRAM
-//#define CAMERA_MODEL_M5STACK_WIDE
 #define CAMERA_MODEL_AI_THINKER
 #include "camera_pins.h"
 
@@ -30,10 +35,12 @@ camera_fb_t * fb = NULL;
 long current_millis;
 long last_detected_millis = 0;
 
-#define relay_pin 2 // pin 12 can also be used
+#define relay_pin 2
 unsigned long door_opened_millis = 0;
-long interval = 5000;           // open lock for ... milliseconds
+long interval = 5000;
 bool face_recognised = false;
+
+TaskHandle_t loop0TaskHandle = NULL; // Handle for loop0_task
 
 void app_facenet_main();
 void app_httpserver_init();
@@ -44,7 +51,6 @@ typedef struct
   box_array_t *net_boxes;
   dl_matrix3d_t *face_id;
 } http_img_process_result;
-
 
 static inline mtmn_config_t app_mtmn_config()
 {
@@ -91,6 +97,7 @@ typedef struct
 httpd_resp_value st_name;
 
 void setup() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println();
@@ -119,7 +126,6 @@ void setup() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  //init with high specs to pre-allocate larger buffers
   if (psramFound()) {
     config.frame_size = FRAMESIZE_UXGA;
     config.jpeg_quality = 10;
@@ -135,7 +141,6 @@ void setup() {
   pinMode(14, INPUT_PULLUP);
 #endif
 
-  // camera init
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
@@ -150,21 +155,51 @@ void setup() {
   s->set_hmirror(s, 1);
 #endif
 
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+WiFi.mode(WIFI_STA);  // Set the operating mode of the ESP8266 module in client mode (as a client to a WiFi access point)
+WiFi.begin(ssid, password);
+Serial.println();
+
+  start_time = millis(); // Remember the connection start time
+  Serial.print("Connecting to Wi-Fi");
+  while (!WFconn && millis() - start_time < 30000) { // Wait for the connection to be established or until 30 seconds have passed
+    if (WiFi.status() == WL_CONNECTED) { // If connected to a WiFi network
+      Serial.println();
+      Serial.print("Connected to ");
+      Serial.println(ssid);
+      Serial.print("IP address: ");
+      Serial.println(WiFi.localIP());
+      WFconn = true;
+      // Actions that need to be performed once the connection to the WiFi network is established.
+      WiFi.setAutoReconnect(true);
+      WiFi.persistent(true);
+
+  Serial.print("Camera Ready! Use 'http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("' to connect");
+  
+    } else {
+      Serial.print(".");
+      delay(500); // Pause the loop for 500 ms
+    }
   }
-  Serial.println("");
-  Serial.println("WiFi connected");
+
+  if (!WFconn) { // If the connection to the WiFi network is not established within 30 seconds
+    Serial.println();
+    Serial.println("Connection failed"); // Displaying an error message to console
+    // Actions to be taken if the connection to the WiFi network is not established
+    WFconn = false;
+  }
 
   app_httpserver_init();
   app_facenet_main();
   socket_server.listen(82);
 
-  Serial.print("Camera Ready! Use 'http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("' to connect");
+
+
+  xTaskCreatePinnedToCore(loop0_task, "loop0_task", 4096, NULL, 1, &loop0TaskHandle, 0);
+
+  // Increase the watchdog timeout for core 0
+  esp_task_wdt_init(30, true);
 }
 
 static esp_err_t index_handler(httpd_req_t *req) {
@@ -207,20 +242,19 @@ static inline int do_enrollment(face_id_name_list *face_list, dl_matrix3d_t *new
   return left_sample_face;
 }
 
-static esp_err_t send_face_list(WebsocketsClient &client)
+void send_face_list(WebsocketsClient &client)
 {
-  client.send("delete_faces"); // tell browser to delete all faces
+  client.send("delete_faces");
   face_id_node *head = st_face_list.head;
   char add_face[64];
-  for (int i = 0; i < st_face_list.count; i++) // loop current faces
-  {
+  for (int i = 0; i < st_face_list.count; i++) {
     sprintf(add_face, "listface:%s", head->id_name);
-    client.send(add_face); //send face to browser
+    client.send(add_face);
     head = head->next;
   }
 }
 
-static esp_err_t delete_all_faces(WebsocketsClient &client)
+void delete_all_faces(WebsocketsClient &client)
 {
   delete_face_all_in_flash_with_name(&st_face_list);
   client.send("delete_faces");
@@ -251,7 +285,7 @@ void handle_message(WebsocketsClient &client, WebsocketsMessage msg)
     char person[ENROLL_NAME_LEN * FACE_ID_SAVE_NUMBER];
     msg.data().substring(7).toCharArray(person, sizeof(person));
     delete_face_id_in_flash_with_name(&st_face_list, person);
-    send_face_list(client); // reset faces in the browser
+    send_face_list(client);
   }
   if (msg.data() == "delete_all") {
     delete_all_faces(client);
@@ -260,10 +294,10 @@ void handle_message(WebsocketsClient &client, WebsocketsMessage msg)
 
 void open_door(WebsocketsClient &client) {
   if (digitalRead(relay_pin) == LOW) {
-    digitalWrite(relay_pin, HIGH); //close (energise) relay so door unlocks
+    digitalWrite(relay_pin, HIGH);
     Serial.println("Door Unlocked");
     client.send("door_open");
-    door_opened_millis = millis(); // time relay closed and door opened
+    door_opened_millis = millis();
   }
 }
 
@@ -277,11 +311,17 @@ void loop() {
   send_face_list(client);
   client.send("STREAMING");
 
+  autonom = 0;
+  if (loop0TaskHandle != NULL) {
+    esp_task_wdt_delete(loop0TaskHandle); // Disable WDT for loop0_task
+    //vTaskSuspend(loop0TaskHandle); // Suspend loop0_task when client connects
+  }
+
   while (client.available()) {
     client.poll();
 
-    if (millis() - interval > door_opened_millis) { // current time - face recognised time > 5 secs
-      digitalWrite(relay_pin, LOW); //open relay
+    if (millis() - interval > door_opened_millis) {
+      digitalWrite(relay_pin, LOW);
     }
 
     fb = esp_camera_fb_get();
@@ -299,7 +339,6 @@ void loop() {
       {
         if (align_face(out_res.net_boxes, image_matrix, aligned_face) == ESP_OK)
         {
-
           out_res.face_id = get_face_id(aligned_face);
           last_detected_millis = millis();
           if (g_state == START_DETECT) {
@@ -320,7 +359,6 @@ void loop() {
               sprintf(captured_message, "FACE CAPTURED FOR %s", st_face_list.tail->id_name);
               client.send(captured_message);
               send_face_list(client);
-
             }
           }
 
@@ -350,7 +388,7 @@ void loop() {
         }
       }
 
-      if (g_state == START_DETECT && millis() - last_detected_millis > 500) { // Detecting but no face detected
+      if (g_state == START_DETECT && millis() - last_detected_millis > 500) {
         client.send("DETECTING");
       }
 
@@ -360,5 +398,73 @@ void loop() {
 
     esp_camera_fb_return(fb);
     fb = NULL;
+  }
+  autonom = 1;
+  if (loop0TaskHandle != NULL) {
+    //vTaskResume(loop0TaskHandle); // Resume loop0_task when client disconnects
+    esp_task_wdt_add(loop0TaskHandle); // Re-enable WDT for loop0_task
+  }
+}
+
+void open_doora() {
+  if (digitalRead(relay_pin) == LOW) {
+    digitalWrite(relay_pin, HIGH);
+    Serial.println("Door Unlocked");
+    door_opened_millis = millis();
+  }
+}
+
+void loop0_task(void *pvParameters) {
+  // Increase the watchdog timeout for this task
+  esp_task_wdt_add(NULL);
+
+  dl_matrix3du_t *image_matrix = dl_matrix3du_alloc(1, 320, 240, 3);
+  http_img_process_result out_res = {0};
+  out_res.image = image_matrix->item;
+
+  while (true) {
+    if (autonom == 1) {
+      esp_task_wdt_reset(); // Resetting the Watchdog Timer
+
+      if (millis() - interval > door_opened_millis) {
+        digitalWrite(relay_pin, LOW);
+      }
+
+      fb = esp_camera_fb_get();
+
+      out_res.net_boxes = NULL;
+      out_res.face_id = NULL;
+
+      fmt2rgb888(fb->buf, fb->len, fb->format, out_res.image);
+
+      out_res.net_boxes = face_detect(image_matrix, &mtmn_config);
+
+      if (out_res.net_boxes) {
+        if (align_face(out_res.net_boxes, image_matrix, aligned_face) == ESP_OK) {
+          out_res.face_id = get_face_id(aligned_face);
+          last_detected_millis = millis();
+
+          if (st_face_list.count > 0) {
+            face_id_node *f = recognize_face_with_name(&st_face_list, out_res.face_id);
+            if (f) {
+              char recognised_message[64];
+              sprintf(recognised_message, "DOOR OPEN FOR %s", f->id_name);
+              Serial.println(recognised_message);
+              open_doora();
+            } else {
+              Serial.println("FACE NOT RECOGNISED");
+            }
+          }
+          dl_matrix3d_free(out_res.face_id);
+        }
+      } else {
+        Serial.println("NO FACE DETECTED");
+      }
+
+      esp_camera_fb_return(fb);
+      fb = NULL;
+    } else {
+      vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
   }
 }
