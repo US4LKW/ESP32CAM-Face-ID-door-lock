@@ -175,7 +175,7 @@ Serial.println();
   Serial.print("Camera Ready! Use 'http://");
   Serial.print(WiFi.localIP());
   Serial.println("' to connect");
-  
+  Serial.println("You can use this URL:  http://esp32-arduino.lan/");
     } else {
       Serial.print(".");
       delay(500); // Pause the loop for 500 ms
