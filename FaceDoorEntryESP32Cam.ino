@@ -155,7 +155,7 @@ void setup() {
   s->set_hmirror(s, 1);
 #endif
 
-WiFi.mode(WIFI_STA);  // Set the operating mode of the ESP8266 module in client mode (as a client to a WiFi access point)
+WiFi.mode(WIFI_STA);  // Set the operating mode of the ESP32CAM module in client mode (as a client to a WiFi access point)
 WiFi.begin(ssid, password);
 Serial.println();
 
