@@ -167,6 +167,42 @@ Serial.println();
       Serial.println(ssid);
       Serial.print("IP address: ");
       Serial.println(WiFi.localIP());
+      
+      // Get the signal strength in dBm
+      int32_t rssi = WiFi.RSSI();
+    
+      // Convert RSSI to percentage
+      int rssiPercent = 2 * (rssi + 100);
+      if (rssiPercent > 100) {
+        rssiPercent = 100;
+      } else if (rssiPercent < 0) {
+        rssiPercent = 0;
+      }
+    
+      // Determine signal quality
+      String signalQuality;
+      if (rssi >= -50) {
+        signalQuality = "Excellent signal!";
+      } else if (rssi >= -60) {
+        signalQuality = "Good signal!";
+      } else if (rssi >= -70) {
+        signalQuality = "Fair signal!";
+      } else if (rssi >= -80) {
+        signalQuality = "Weak signal!";
+      } else if (rssi >= -90) {
+        signalQuality = "Very weak signal!";
+      } else {
+        signalQuality = "Poor signal!";
+      }
+    
+      // Print the signal strength in the specified format
+      Serial.print("Signal strength (RSSI): ");
+      Serial.print(rssi);
+      Serial.print(" dBm (");
+      Serial.print(rssiPercent);
+      Serial.print("%) ");
+      Serial.println(signalQuality);
+      
       WFconn = true;
       // Actions that need to be performed once the connection to the WiFi network is established.
       WiFi.setAutoReconnect(true);
